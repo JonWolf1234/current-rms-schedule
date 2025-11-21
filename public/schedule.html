@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Current RMS – Staff Schedule</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 20px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: center; }
+    th.sticky-top { position: sticky; top: 0; background: #f7f7f7; z-index: 2; }
+    th.sticky-left, td.sticky-left { position: sticky; left: 0; background: #fff; z-index: 1; }
+    th.sticky-top.sticky-left { z-index: 3; }
+    .assigned { font-weight: bold; }
+    .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <h1>Staff vs Job Schedule</h1>
+
+  <div class="controls">
+    <label>Start: <input type="date" id="start"></label>
+    <label>End: <input type="date" id="end"></label>
+    <button id="load">Load</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="table-container"></div>
+
+  <script>
+    const apiBase = ''; // same server
+
+    document.getElementById('load').addEventListener('click', loadSchedule);
+
+    async function loadSchedule() {
+      const start = document.getElementById('start').value;
+      const end = document.getElementById('end').value;
+      const status = document.getElementById('status');
+      const container = document.getElementById('table-container');
+
+      if (!start || !end) {
+        alert("Pick a start and end date first");
+        return;
+      }
+
+      status.textContent = "Loading...";
+      container.innerHTML = "";
+
+      try {
+        const res = await fetch(`${apiBase}/api/schedule?start=${start}&end=${end}`);
+        if (!res.ok) throw new Error("Request failed: " + res.status);
+
+        const data = await res.json();
+        renderTable(data, container);
+        status.textContent = `Loaded ${data.jobs.length} jobs.`;
+
+      } catch (err) {
+        console.error(err);
+        status.textContent = "Error loading data.";
+      }
+    }
+
+    function renderTable(data, container) {
+      const { jobs, staff, assignments } = data;
+
+      if (jobs.length === 0) {
+        container.textContent = "No jobs found.";
+        return;
+      }
+
+      const table = document.createElement("table");
+
+      // Header
+      const thead = document.createElement("thead");
+      const row = document.createElement("tr");
+
+      const corner = document.createElement("th");
+      corner.textContent = "Job / Staff";
+      corner.classList.add("sticky-top", "sticky-left");
+      row.appendChild(corner);
+
+      staff.forEach(s => {
+        const th = document.createElement("th");
+        th.textContent = s.name;
+        th.classList.add("sticky-top");
+        row.appendChild(th);
+      });
+
+      thead.appendChild(row);
+      table.appendChild(thead);
+
+      // Body
+      const tbody = document.createElement("tbody");
+
+      jobs.forEach(job => {
+        const tr = document.createElement("tr");
+
+        const jobCell = document.createElement("td");
+        jobCell.classList.add("sticky-left");
+        jobCell.innerHTML = `<strong>${job.name}</strong><br><small>${job.starts_at} → ${job.ends_at}</small>`;
+        tr.appendChild(jobCell);
+
+        staff.forEach(s => {
+          const td = document.createElement("td");
+          const isAssigned = (assignments[job.id] || []).includes(s.id);
+          td.textContent = isAssigned ? "✔" : "";
+          if (isAssigned) td.classList.add("assigned");
+          tr.appendChild(td);
+        });
+
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(tbody);
+      container.appendChild(table);
+    }
+  </script>
+</body>
+</html>
+
