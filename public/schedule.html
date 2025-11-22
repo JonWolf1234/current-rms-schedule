@@ -11,38 +11,66 @@
     th.sticky-left, td.sticky-left { position: sticky; left: 0; background: #fff; z-index: 1; }
     th.sticky-top.sticky-left { z-index: 3; }
     .assigned { font-weight: bold; }
-    .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+    .controls label { display: flex; gap: 4px; align-items: center; }
   </style>
 </head>
 <body>
   <h1>Staff vs Job Schedule</h1>
 
   <div class="controls">
-    <label>Start: <input type="date" id="start"></label>
-    <label>End: <input type="date" id="end"></label>
+    <label>
+      Start:
+      <input type="date" id="start">
+    </label>
+    <label>
+      End:
+      <input type="date" id="end">
+    </label>
     <button id="load">Load</button>
+
+    <label>
+      Crew:
+      <select id="crewFilter">
+        <option value="all">All crew</option>
+        <option value="assigned">Only crew on shown jobs</option>
+      </select>
+    </label>
+
     <span id="status"></span>
   </div>
 
   <div id="table-container"></div>
 
   <script>
-    const apiBase = ''; // same server
+    const apiBase = ''; // same origin
 
-    document.getElementById('load').addEventListener('click', loadSchedule);
+    let currentData = null;
+    let currentFilter = 'all';
+
+    const loadBtn = document.getElementById('load');
+    const crewFilterSelect = document.getElementById('crewFilter');
+    const statusEl = document.getElementById('status');
+    const container = document.getElementById('table-container');
+
+    loadBtn.addEventListener('click', loadSchedule);
+    crewFilterSelect.addEventListener('change', () => {
+      currentFilter = crewFilterSelect.value;
+      if (currentData) {
+        renderTable(currentData, container);
+      }
+    });
 
     async function loadSchedule() {
       const start = document.getElementById('start').value;
       const end = document.getElementById('end').value;
-      const status = document.getElementById('status');
-      const container = document.getElementById('table-container');
 
       if (!start || !end) {
         alert("Pick a start and end date first");
         return;
       }
 
-      status.textContent = "Loading...";
+      statusEl.textContent = "Loading...";
       container.innerHTML = "";
 
       try {
@@ -50,20 +78,44 @@
         if (!res.ok) throw new Error("Request failed: " + res.status);
 
         const data = await res.json();
+        currentData = data; // remember last data so filter can re-render
         renderTable(data, container);
-        status.textContent = `Loaded ${data.jobs.length} jobs.`;
 
+        statusEl.textContent = `Loaded ${data.jobs.length} jobs and ${data.staff.length} crew.`;
       } catch (err) {
         console.error(err);
-        status.textContent = "Error loading data.";
+        statusEl.textContent = "Error loading data.";
       }
     }
 
     function renderTable(data, container) {
       const { jobs, staff, assignments } = data;
 
-      if (jobs.length === 0) {
+      container.innerHTML = "";
+
+      if (!jobs || jobs.length === 0) {
         container.textContent = "No jobs found.";
+        return;
+      }
+
+      // Decide which crew to show based on filter
+      let staffToShow = staff || [];
+
+      if (currentFilter === 'assigned') {
+        const usedIds = new Set();
+
+        // collect all staff ids that are on at least one job in this data set
+        jobs.forEach(job => {
+          const staffIds = assignments[job.id] || assignments[String(job.id)] || [];
+          staffIds.forEach(id => usedIds.add(id));
+        });
+
+        staffToShow = staffToShow.filter(s => usedIds.has(s.id));
+      }
+
+      // If after filtering there are no staff, show a message
+      if (!staffToShow.length) {
+        container.textContent = "No crew match this filter.";
         return;
       }
 
@@ -71,43 +123,45 @@
 
       // Header
       const thead = document.createElement("thead");
-      const row = document.createElement("tr");
+      const headRow = document.createElement("tr");
 
       const corner = document.createElement("th");
       corner.textContent = "Job / Staff";
       corner.classList.add("sticky-top", "sticky-left");
-      row.appendChild(corner);
+      headRow.appendChild(corner);
 
-      staff.forEach(s => {
+      staffToShow.forEach(s => {
         const th = document.createElement("th");
         th.textContent = s.name;
         th.classList.add("sticky-top");
-        row.appendChild(th);
+        headRow.appendChild(th);
       });
 
-      thead.appendChild(row);
+      thead.appendChild(headRow);
       table.appendChild(thead);
 
       // Body
       const tbody = document.createElement("tbody");
 
       jobs.forEach(job => {
-        const tr = document.createElement("tr");
+        const row = document.createElement("tr");
 
         const jobCell = document.createElement("td");
         jobCell.classList.add("sticky-left");
-        jobCell.innerHTML = `<strong>${job.name}</strong><br><small>${job.starts_at} → ${job.ends_at}</small>`;
-        tr.appendChild(jobCell);
+        const dates = [job.starts_at, job.ends_at].filter(Boolean).join(" → ");
+        jobCell.innerHTML = `<strong>${job.name}</strong><br><small>${dates}</small>`;
+        row.appendChild(jobCell);
 
-        staff.forEach(s => {
+        staffToShow.forEach(s => {
           const td = document.createElement("td");
-          const isAssigned = (assignments[job.id] || []).includes(s.id);
+          const staffIds = assignments[job.id] || assignments[String(job.id)] || [];
+          const isAssigned = staffIds.includes(s.id);
           td.textContent = isAssigned ? "✔" : "";
           if (isAssigned) td.classList.add("assigned");
-          tr.appendChild(td);
+          row.appendChild(td);
         });
 
-        tbody.appendChild(tr);
+        tbody.appendChild(row);
       });
 
       table.appendChild(tbody);
@@ -116,4 +170,3 @@
   </script>
 </body>
 </html>
-
