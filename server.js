@@ -1,165 +1,152 @@
 // server.js
-require('dotenv').config();
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
+require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
+const cors = require("cors");
 
 const app = express();
 
-// Allow frontend to call our backend
+// CORS + static files
 app.use(cors());
+app.use(express.static("public"));
 
-// Serve static files from /public (schedule.html etc.)
-app.use(express.static('public'));
-
-// Axios client for Current RMS
+// --- Current RMS client (correct auth headers) ---
 const current = axios.create({
-  baseURL: 'https://api.current-rms.com/api/v1',
+  baseURL: "https://api.current-rms.com/api/v1",
   headers: {
-    'X-SUBDOMAIN': process.env.CURRENT_SUBDOMAIN,
-    'X-AUTH-TOKEN': process.env.CURRENT_API_KEY,
-    'Accept': 'application/json'
-  }
+    "X-SUBDOMAIN": process.env.CURRENT_SUBDOMAIN,
+    "X-AUTH-TOKEN": process.env.CURRENT_API_KEY,
+    Accept: "application/json",
+  },
 });
 
-/**
- * Helper: fetch opportunities (jobs) in a date range
- * NOTE: Adjust params if your Current RMS filters use different names.
- */
-async function fetchJobs(start, end) {
-  const resp = await current.get('/opportunities', {
-    params: {
-      // These param names may need tweaking depending on your system.
-      // They are a reasonable guess for date range filtering:
-      starts_at_from: start,
-      starts_at_to: end,
-      per_page: 200,
-      view: 'all'
-    }
-  });
+// --- Helper: fetch ALL pages of a list endpoint ---
+// path: "/members" or "/opportunities"
+// collectionKey: "members" or "opportunities"
+// baseParams: any params you always want to send
+async function fetchAllPages(path, collectionKey, baseParams = {}) {
+  const per_page = 100; // bump this up from defaults
+  let page = 1;
+  let items = [];
 
-  const opportunities = resp.data?.opportunities || resp.data?.data || [];
+  // safety guard: max 50 pages => 5000 records
+  while (page <= 50) {
+    const resp = await current.get(path, {
+      params: {
+        ...baseParams,
+        page,
+        per_page,
+      },
+    });
 
-  return opportunities.map(o => ({
-    id: o.id,
-    name: o.name || o.subject || `Opportunity #${o.id}`,
-    starts_at: o.starts_at || o.starts_at_date || o.start_at || null,
-    ends_at: o.ends_at || o.ends_at_date || o.end_at || null
-  }));
+    const pageItems = resp.data?.[collectionKey] || [];
+    items = items.concat(pageItems);
+
+    // If we got fewer than per_page, we've reached the end
+    if (pageItems.length < per_page) break;
+
+    page += 1;
+  }
+
+  return items;
 }
 
-/**
- * Helper: fetch ONLY bookable resources (not all people/organisations)
- *
- * This uses /members and then filters down. The exact fields depend on your
- * Current RMS data, so we include a few common patterns:
- *  - m.bookable or m.is_bookable === true
- *  - m.kind === 'resource'
- *  - m.member_type === 'resource'
- *
- * You can tweak the filter after inspecting a sample member object.
- */
-async function fetchBookableResources() {
-  const resp = await current.get('/members', {
-    params: {
-      per_page: 200
-    }
-  });
-
-  const members = resp.data?.members || resp.data?.data || [];
-
-  const resources = members.filter(m => {
-    const kind = (m.kind || m.member_type || '').toString().toLowerCase();
-    const bookableFlag = m.bookable || m.is_bookable || m.is_resource;
-
-    // Keep if it's explicitly bookable OR looks like a resource-type record
-    if (bookableFlag) return true;
-    if (kind === 'resource' || kind === 'resources') return true;
-
-    return false;
-  });
-
-  return resources.map(m => {
-    const name =
-      m.name ||
-      [m.first_name, m.last_name].filter(Boolean).join(' ') ||
-      `Resource ${m.id}`;
-
-    return {
-      id: m.id,
-      name
-    };
-  });
-}
-
-/**
- * TEMP: test endpoint to check that auth to Current RMS is working
- * - http://localhost:4000/api/test-current
- */
-app.get('/api/test-current', async (req, res) => {
+// --- Simple test route to confirm auth works ---
+// Visit /api/test-current in the browser to sanity-check API access.
+app.get("/api/test-current", async (req, res) => {
   try {
-    const resp = await current.get('/members', { params: { per_page: 5 } });
-    const members = resp.data?.members || resp.data?.data || [];
+    const members = await fetchAllPages("/members", "members", {
+      // you can add filters in q if needed later
+    });
+
     res.json({
       ok: true,
-      sample_count: members.length,
-      sample: members.slice(0, 3)
+      members_count: members.length,
     });
   } catch (err) {
     console.error(err?.response?.data || err.message);
     res.status(500).json({
       ok: false,
-      details: err?.response?.data || err.message
+      error: "Failed to talk to Current RMS",
+      details: err?.response?.data || err.message,
     });
   }
 });
 
-/**
- * MAIN ENDPOINT:
- * GET /api/schedule?start=YYYY-MM-DD&end=YYYY-MM-DD
- *
- * STEP 1:
- *  - Fetch jobs (opportunities) in date range
- *  - Fetch ONLY bookable resources
- *  - Return empty assignments (we'll wire real bookings in step 2)
- */
-app.get('/api/schedule', async (req, res) => {
+// --- Main schedule endpoint ---
+// GET /api/schedule?start=YYYY-MM-DD&end=YYYY-MM-DD
+app.get("/api/schedule", async (req, res) => {
   const { start, end } = req.query;
 
   if (!start || !end) {
-    return res.status(400).json({
-      error: 'start and end query params are required (YYYY-MM-DD).'
-    });
+    return res
+      .status(400)
+      .json({ error: "start and end query params are required (YYYY-MM-DD)." });
   }
 
+  // Build full-day range in UTC
+  const startIso = new Date(`${start}T00:00:00Z`).toISOString();
+  const endIso = new Date(`${end}T23:59:59Z`).toISOString();
+
   try {
-    // 1. Fetch jobs in the date range
-    const jobs = await fetchJobs(start, end);
+    // 1) Fetch ALL members (staff) across all pages
+    const members = await fetchAllPages("/members", "members", {
+      // If you want to restrict to active only later, you can add:
+      // q: { active_eq: true }
+    });
 
-    // 2. Fetch only bookable resources
-    const staff = await fetchBookableResources();
+    const staff = members.map((m) => ({
+      id: m.id,
+      // Try various common name fields, fall back to generic label
+      name:
+        m.name ||
+        m.full_name ||
+        m.display_name ||
+        m.company_name ||
+        `Member #${m.id}`,
+    }));
 
-    // 3. For now, no assignment logic (we'll add bookings later)
+    // 2) Fetch ALL opportunities in the date range across all pages
+    // Using Ransack-style filters (see Current RMS docs / MCP repo)
+    const opportunities = await fetchAllPages("/opportunities", "opportunities", {
+      q: {
+        // Only date filters: include any status for now so nothing is missed.
+        // Adjust these if you want only confirmed jobs etc.
+        starts_at_gteq: startIso,
+        ends_at_lteq: endIso,
+      },
+    });
+
+    const jobs = opportunities.map((o) => ({
+      id: o.id,
+      name: o.name || o.subject || `Opportunity #${o.id}`,
+      starts_at: o.starts_at || o.starts_at_date || o.start_at,
+      ends_at: o.ends_at || o.ends_at_date || o.end_at,
+    }));
+
+    // 3) For now, no assignment logic – just an empty list per job
+    //    so we can first confirm staff + job counts are correct.
     const assignments = {};
     for (const job of jobs) {
-      assignments[job.id] = [];
+      assignments[job.id] = []; // later we'll fill this with staff IDs
     }
 
     res.json({ jobs, staff, assignments });
   } catch (err) {
-    console.error('Error in /api/schedule:', err?.response?.data || err.message);
+    console.error(err?.response?.data || err.message);
     res.status(500).json({
-      error: 'Failed to fetch schedule from Current RMS',
-      details: err?.response?.data || err.message
+      error: "Failed to fetch schedule from Current RMS",
+      details: err?.response?.data || err.message,
     });
   }
 });
 
-// Simple root check
-app.get('/', (_req, res) => {
-  res.send('Current RMS schedule API running.');
+// Root route
+app.get("/", (_req, res) => {
+  res.send("Current RMS schedule API running.");
 });
 
+// Start server
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
